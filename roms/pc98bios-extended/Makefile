@@ -1,4 +1,4 @@
-# Minimal PC-9821 BIOS ROM banks.
+# Extended PC-9821 compatibility BIOS ROM banks.
 #
 # Each target is one 32 KiB bank image, linked flat and emitted as raw binary
 # the same way pc-bios/optionrom builds its option ROMs.  Drop the results in
@@ -8,7 +8,7 @@ CC      ?= gcc
 OBJCOPY ?= objcopy
 
 SRC_DIR := $(dir $(lastword $(MAKEFILE_LIST)))
-QEMU_BLOB_DIR ?= $(abspath $(SRC_DIR)../../pc-bios)
+QEMU_BLOB_DIR ?= $(abspath $(SRC_DIR)../../pc-bios/pc98bios-extended)
 
 CFLAGS  := -m16 -march=i486 -ffreestanding -Wall -Werror -Os -fno-pie
 LDFLAGS := -nostdlib -Wl,--build-id=none,-T,$(SRC_DIR)bank.lds,-m,elf_i386,-no-pie

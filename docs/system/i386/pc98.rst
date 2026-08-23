@@ -44,6 +44,24 @@ The ITF and the three main BIOS banks are mandatory; ``pc98pci.bin`` and
 ``pc98ide.bin`` are optional.  The text font ``pc98font.bin`` is required for
 display output.
 
+Two compatibility-ROM sets are installed.  The standard ``pc98bios`` set is
+stored in QEMU's firmware directory, while the extended compatibility BIOS is
+stored in its ``pc98bios-extended`` subdirectory.  Select the extended set by
+passing that subdirectory to ``-L``; for example, with the default local
+installation prefix:
+
+.. code-block:: console
+
+   qemu-system-i386 -M pc9821 \
+       -L /usr/local/share/qemu/pc98bios-extended \
+       -drive if=ide,format=raw,file=hdd.raw
+
+The extended ROM sources can be rebuilt and staged for QEMU with:
+
+.. code-block:: console
+
+   make -C roms/pc98bios-extended qemu-blobs
+
 Running
 -------
 

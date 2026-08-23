@@ -92,8 +92,21 @@ blobs = [
   'vof-nvram.bin',
 ]
 
+pc98_extended_blobs = [
+  'pc98bios-extended/pc98itf.bin',
+  'pc98bios-extended/pc98ide.bin',
+  'pc98bios-extended/pc98scsi.bin',
+  'pc98bios-extended/pc98pci.bin',
+  'pc98bios-extended/pc98bios.bin',
+  'pc98bios-extended/pc98basic.bin',
+  'pc98bios-extended/pc98font.bin',
+]
+
 if get_option('install_blobs')
   install_data(blobs, install_dir: qemu_datadir, install_mode: 'rw-r--r--')
+  install_data(pc98_extended_blobs,
+               install_dir: qemu_datadir / 'pc98bios-extended',
+               install_mode: 'rw-r--r--')
 endif
 
 subdir('descriptors')

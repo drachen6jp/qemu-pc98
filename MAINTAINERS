@@ -2098,7 +2098,9 @@ F: block/vvfat98.c
 F: block/pc98-vvfat-boot.S
 F: block/pc98-vvfat-boot.h
 F: pc-bios/pc98*.bin
+F: pc-bios/pc98bios-extended/
 F: roms/pc98bios/
+F: roms/pc98bios-extended/
 F: include/hw/i386/pc98.h
 F: include/hw/misc/pc98-sys.h
 F: include/hw/input/pc98-kbd.h
