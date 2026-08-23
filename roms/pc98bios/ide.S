@@ -215,6 +215,7 @@ init_entry:
 	jne	3f
 	call	ata_identify_geometry
 	call	ata_enable_multiple
+	call	changeCHS
 3:
 	incw	%si
 	cmpw	$4, %si
@@ -285,6 +286,69 @@ init_entry:
 	popw	%ax
 	popw	%ds
 	lret
+
+changeCHS:
+	pushw	%bx
+	movl	$0, %eax
+	movw	$0x200, %bx
+	pushw	%es
+	pushw	%cs
+	popw	%es
+	movw	$1, %cx
+	movw	$0x3200, %di	//D800:3200h
+	pushw	%si
+	call	ata_pio_read_bytes
+	popw	%si
+	movw	%es:0x3202, %ax
+	popw	%es
+	testb	%al, %al
+	je	1f
+	testb	%ah, %ah
+	je	1f
+	cmpw	$0x9090, %ax
+	je	1f
+	popw	%bx
+//	movzbl	%cs:ROM_WORK_HEADS(%bx), %ecx
+//	movzbl	%cs:ROM_WORK_SECTORS(%bx), %edx
+//	imull	%edx, %ecx
+//	movzwl	%cs:ROM_WORK_CYLINDERS(%bx), %edx
+//	imull	%edx, %ecx
+	movl	%cs:0x3f00, %ecx
+	movb	%ah, %cs:ROM_WORK_HEADS(%bx)
+	movb	%al, %cs:ROM_WORK_SECTORS(%bx)
+	mulb	%ah
+	andl	$0xffff, %eax
+	xorl	%edx, %edx
+	xchgl	%ecx, %eax
+	divl	%ecx
+	movw	%ax, %cs:ROM_WORK_CYLINDERS(%bx)
+9:
+	movw	$IDE_DATA, %dx
+	inw	%dx, %ax
+	movw	$IDE_STATUS, %dx
+	inb	%dx, %al
+	testb	$0x8,%al
+	jnz	9b
+	movw	$IDE_DRVHEAD, %dx
+	inb	%dx,%al
+	and	$0x10,%al
+	movb	%cs:ROM_WORK_HEADS(%bx), %ah
+	cmpb	$0x10, %ah
+	ja	2f
+	decb	%ah
+	orb	%ah, %al
+	outb	%al, %dx
+	movw	$IDE_SECCNT, %dx
+	movb	%cs:ROM_WORK_SECTORS(%bx), %al
+	outb	%al,%dx
+	movw	$IDE_COMMAND, %dx
+	movb	$ATA_SPECIFY, %al
+	outb	%al, %dx
+2:
+	ret
+1:
+	popw	%bx
+	ret
 
 /*
  * IDE IRQ9 acknowledgement.
@@ -582,14 +646,19 @@ request_lba:
 	addl	%edx, %eax
 	movzbl	6(%bp), %edx
 	addl	%edx, %eax
+	testl	$0xf0000000, %eax		//over 29bit 変なところ触らないように弾く
+	jne	request_bad_device
 	clc
 	ret
 
 request_relative:
 	movzwl	4(%bp), %eax
-	movzbl	6(%bp), %edx
+	movzwl	6(%bp), %edx
+//	movzbl	6(%bp), %edx		//no 32bitLBA enable
 	shll	$16, %edx
 	orl	%edx, %eax
+	testl	$0xf0000000, %eax	//over 29bit 変なところ触らないように弾く
+	jne	request_bad_device
 	clc
 	ret
 
@@ -601,7 +670,8 @@ request_bad_device:
 /* ATAPI READ(10) always addresses 2048-byte logical blocks linearly. */
 request_linear_lba:
 	movzwl	4(%bp), %eax
-	movzbl	6(%bp), %edx
+	movzwl	6(%bp), %edx
+//	movzbl	6(%bp), %edx		//no 32bitLBA enable
 	shll	$16, %edx
 	orl	%edx, %eax
 	clc
@@ -765,7 +835,6 @@ ata_identify_geometry:
 	inw	%dx, %ax		/* word 5: bytes per sector */
 	inw	%dx, %ax		/* word 6: sectors per track */
 	movw	%ax, %cx
-
 	testw	%bx, %bx
 	jz	1f
 
@@ -923,7 +992,28 @@ ata_identify_geometry:
 	movb	%cs:ROM_WORK_SELECTED, %bl
 	movb	%al, %cs:ROM_WORK_MULTI_MAX(%bx)
 4:
-	movw	$208, %cx		/* words 48 through 255 */
+	movw	$52, %cx		/* words 48 through 99 */
+5:
+	inw	%dx, %ax
+	loop	5b
+	inw	%dx, %ax
+	movw	%ax, %di
+	rorl	$16, %edi
+	inw	%dx, %ax
+	movw	%ax, %di
+	rorl	$16, %edi
+	inw	%dx, %ax
+	shll	$16, %eax
+	inw	%dx, %ax
+	testl	%eax, %eax
+	jne	6f
+	cmpl	$0xFE0001FF, %edi
+	jb	7f
+6:
+	movl	$0xFE0001FF, %edi
+7:
+	movl	%edi, %cs:0x3f00
+	movw	$152, %cx		/* words 104 through 255 */
 5:
 	inw	%dx, %ax
 	loop	5b
