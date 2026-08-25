@@ -37,6 +37,10 @@
 	.equ	ATA_READ_MULTIPLE,	0xc4
 	.equ	ATA_WRITE_MULTIPLE,	0xc5
 	.equ	ATA_SET_MULTIPLE,	0xc6
+	.equ	ATA_READ_EXTSECTORS,0x24
+	.equ	ATA_WRITE_EXTSECTORS,0x34
+	.equ	ATA_READ_EXTMULTIPLE,0x29
+	.equ	ATA_WRITE_EXTMULTIPLE,0x39
 	.equ	ATA_PACKET,	0xa0
 	.equ	ATA_IDENTIFY,	0xec
 	.equ	ATA_ST_ERR,	0x01
@@ -647,7 +651,7 @@ request_lba:
 	movzbl	6(%bp), %edx
 	addl	%edx, %eax
 	testl	$0xf0000000, %eax		//over 29bit 変なところ触らないように弾く
-	jne	request_bad_device
+	jne	over29
 	clc
 	ret
 
@@ -658,7 +662,11 @@ request_relative:
 	shll	$16, %edx
 	orl	%edx, %eax
 	testl	$0xf0000000, %eax	//over 29bit 変なところ触らないように弾く
-	jne	request_bad_device
+	jne	over29
+	clc
+	ret
+
+over29:
 	clc
 	ret
 
@@ -1107,6 +1115,14 @@ ata_multiple_active:
 	ret
 
 ata_read_opcode:
+	testb	$1, %cs:0x3fff
+	je	2f
+	movb	$ATA_READ_EXTSECTORS, %al
+	call	ata_multiple_active
+	jz	1f
+	movb	$ATA_READ_EXTMULTIPLE, %al
+	ret
+2:
 	movb	$ATA_READ_SECTORS, %al
 	call	ata_multiple_active
 	jz	1f
@@ -1115,6 +1131,14 @@ ata_read_opcode:
 	ret
 
 ata_write_opcode:
+	testb	$1, %cs:0x3fff
+	je	2f
+	movb	$ATA_WRITE_EXTSECTORS, %al
+	call	ata_multiple_active
+	jz	1f
+	movb	$ATA_WRITE_EXTMULTIPLE, %al
+	ret
+2:
 	movb	$ATA_WRITE_SECTORS, %al
 	call	ata_multiple_active
 	jz	1f
@@ -1134,6 +1158,49 @@ ata_setup:
 	call	ata_wait_idle
 	jc	1f
 
+	cmpl	$0x10000000, %ebx
+	jb	1f
+
+	movb	$1, %cs:0x3fff
+	movw	$IDE_DRVHEAD, %dx
+	movb	$0xe0, %al
+	testb	$0x01, %cs:ROM_WORK_SELECTED
+	jz	2f
+	orb	$0x10, %al
+2:
+	outb	%al, %dx
+	movw	$IDE_SECCNT, %dx
+	xorb	%al, %al
+	outb	%al, %dx	
+
+	rorl	$24, %ebx
+	movw	$IDE_SECNUM, %dx
+	movb	%bl, %al
+	outb	%al, %dx
+	movw	$IDE_CYLLO, %dx
+	xorb	%al, %al
+	outb	%al, %dx
+	movw	$IDE_CYLHI, %dx
+	outb	%al, %dx
+	roll	$24, %ebx
+	movw	%si, %ax
+	movw	$IDE_SECCNT, %dx
+	outb	%al, %dx
+	movw	$IDE_SECNUM, %dx
+	movb	%bl, %al
+	outb	%al, %dx
+	movw	$IDE_CYLLO, %dx
+	movb	%bh, %al
+	outb	%al, %dx
+	shrl	$16, %ebx
+	movw	$IDE_CYLHI, %dx
+	movb	%bl, %al
+	outb	%al, %dx
+	clc
+	ret
+
+1:
+	movb	$0, %cs:0x3fff
 	movw	%si, %ax
 	movw	$IDE_SECCNT, %dx
 	outb	%al, %dx
