@@ -547,23 +547,24 @@ scsi_read10:
 	movw	$10, %cx
 	call	scsi_exec_in
 	pushfw
-	popw	%bp
+	popw	%ax
 	popw	%dx			/* discard CDB without changing FLAGS */
 	popw	%dx
 	popw	%dx
 	popw	%dx
 	popw	%dx
+	popw	%bp
 	popw	%si
 	popw	%cx
 	popw	%bx
-	popl	%eax
-	testw	$1, %bp
-	popw	%bp
+	testw	$1, %ax
 	jnz	1f
+	popl	%eax
 	xorb	%ah, %ah
 	clc
 	ret
 1:
+	popl	%eax
 	movb	$0x80, %ah
 	stc
 	ret
@@ -598,23 +599,24 @@ scsi_write10:
 	movw	$10, %cx
 	call	scsi_exec_out
 	pushfw
-	popw	%bp
+	popw	%ax
 	popw	%dx			/* discard CDB without changing FLAGS */
 	popw	%dx
 	popw	%dx
 	popw	%dx
 	popw	%dx
+	popw	%bp
 	popw	%si
 	popw	%cx
 	popw	%bx
-	popl	%eax
-	testw	$1, %bp
-	popw	%bp
+	testw	$1, %ax
 	jnz	1f
+	popl	%eax
 	xorb	%ah, %ah
 	clc
 	ret
 1:
+	popl	%eax
 	movb	$0x80, %ah
 	stc
 	ret
