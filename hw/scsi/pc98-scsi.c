@@ -158,9 +158,14 @@ typedef struct Pc98ScsiState {
     bool bios_boot;
     Pc98MemState *mem;
     bool rom_mapped;
+int atten;
+    uint8_t reg_index_;
 } Pc98ScsiState;
 
 OBJECT_DECLARE_SIMPLE_TYPE(Pc98ScsiState, PC98_SCSI)
+
+static void pc98_scsi_data_write(Pc98ScsiState *s, uint8_t value);
+static uint8_t pc98_scsi_data_read(Pc98ScsiState *s);
 
 static int pc98_scsi_irq_index(uint32_t irq_num)
 {
@@ -184,9 +189,11 @@ static uint32_t pc98_scsi_get_count(Pc98ScsiState *s)
 
 static void pc98_scsi_set_count(Pc98ScsiState *s, uint32_t count)
 {
+//printf("set count %x\n",count);
     s->regs[SBIC_COUNT] = count >> 16;
     s->regs[SBIC_COUNT + 1] = count >> 8;
     s->regs[SBIC_COUNT + 2] = count;
+//printf("count0 %x count1 %x count2 %x\n",s->regs[SBIC_COUNT],s->regs[SBIC_COUNT+1],s->regs[SBIC_COUNT+2]);
 }
 
 static void pc98_scsi_irq_timer(void *opaque)
@@ -209,6 +216,7 @@ static void pc98_scsi_lower_irq(Pc98ScsiState *s)
 
 static void pc98_scsi_raise_irq(Pc98ScsiState *s, uint8_t csr)
 {
+//printf("raise irq %x s->regs[BOARD_MEM_BANK] %x CC4 %x\n",csr,s->regs[BOARD_MEM_BANK],s->board_dma);
     s->csr = csr;
     s->regs[SBIC_STATUS] = csr;
     s->asr &= ~(ASR_CIP | ASR_BSY | ASR_DBR);
@@ -267,14 +275,21 @@ static int pc98_scsi_dma_transfer(void *opaque, int nchan,
     int available = dma_len - dma_pos;
     int count;
     uint32_t tc;
-
+//printf("           DMA transfer called async_len %x available %x\n",s->async_len,available);
     if (!s->req || !s->async_len || available <= 0) {
         pc98_scsi_release_dma(s);
         return dma_pos;
     }
-
+//printf("dma_pos %x\n",dma_pos);
     count = MIN((uint32_t)available, s->async_len);
     tc = pc98_scsi_get_count(s);
+
+if(tc < count){
+//printf("set count at 0 %x\n",count);
+ pc98_scsi_set_count(s, count);	//FreeBSD/pc98 11.4環境前回の?小さい数値が残ってるので入れ直し
+ tc = pc98_scsi_get_count(s);
+}
+
     if (tc) {
         count = MIN((uint32_t)count, tc);
     }
@@ -282,10 +297,8 @@ static int pc98_scsi_dma_transfer(void *opaque, int nchan,
         pc98_scsi_release_dma(s);
         return dma_pos;
     }
-
     trace_pc98_scsi_dma_transfer(nchan, dma_pos, dma_len, s->async_len,
                                  tc, count);
-
     if (s->req_to_initiator) {
         dc->write_memory(s->dma, nchan, s->async_buf, dma_pos, count);
     } else {
@@ -294,7 +307,8 @@ static int pc98_scsi_dma_transfer(void *opaque, int nchan,
     s->async_buf += count;
     s->async_len -= count;
     if (tc) {
-        pc98_scsi_set_count(s, tc - count);
+//printf("set count at 1 %x\n",tc - count);
+        pc98_scsi_set_count(s, tc - count);//FreeBSD/pc98 11.4環境で0を入れてるのに次に読んだときに中身が0になってない
     }
     dma_pos += count;
 
@@ -321,24 +335,40 @@ static void pc98_scsi_start_data(Pc98ScsiState *s)
     if (!s->async_len) {
         return;
     }
-
+//printf("s->board_dma %x DMA mode %x at phase %x\n",s->board_dma,s->regs[SBIC_CONTROL],s->phase);
+//printf("scsi_interrupt on phase %x sat %x atten %x\n",s->phase,s->sat,s->atten);
+if(s->phase != PHASE_MSG_OUT)
     s->phase = s->req_to_initiator ? PHASE_DATA_IN : PHASE_DATA_OUT;
-    if (s->board_dma & BOARD_DMA_ENABLE) {
+//printf("s->sat %x phase %x  MSGOUT means 1\n",s->sat,s->phase);
+//    if (s->board_dma & BOARD_DMA_ENABLE) {
+    if ((s->board_dma & BOARD_DMA_ENABLE) &&(s->phase != PHASE_MSG_OUT)) {
+//printf("dma start\n");
+	s->board_dma |= BOARD_DMA_ENABLE;
         IsaDmaClass *dc;
         int channel = (s->regs[BOARD_AUX_CONFIG] >> 6) & 3;
-
         if (!s->dma) {
             return;
         }
+//printf("dma goes\n");
         dc = ISADMA_GET_CLASS(s->dma);
         dc->hold_DREQ(s->dma, channel);
         dc->schedule(s->dma);
+//printf("dma running? chan %x\n",channel);
     } else {
+//printf("noDMA direction %x\n",s->req_to_initiator);
         s->asr |= ASR_DBR;
-        if (!s->sat) {
+	if((s->sat) && (s->phase == PHASE_MSG_OUT)){
+//printf("noDMA data transfer\n");
+    s->phase = s->req_to_initiator ? PHASE_DATA_IN : PHASE_DATA_OUT;
             pc98_scsi_raise_irq(s, s->req_to_initiator ?
                                 CSR_DATA_IN : CSR_DATA_OUT);
-        }
+//            pc98_scsi_raise_irq(s, CSR_COMMAND_OUT);//ずっとこれでやってたが
+        }else 
+        if (!s->sat) {
+//printf("data transfer interrupt direction %x\n",s->req_to_initiator);
+            pc98_scsi_raise_irq(s, s->req_to_initiator ?
+                                CSR_DATA_IN : CSR_DATA_OUT);
+	}
     }
 }
 
@@ -428,6 +458,7 @@ static void pc98_scsi_transfer_data(SCSIRequest *req, uint32_t len)
 {
     Pc98ScsiState *s = req->hba_private;
     uint32_t target = req->dev->id;
+//printf("transfer_data for %x phase %x\n",req->cmd.buf[0],s->phase);
 
     if (req != s->req) {
         return;
@@ -452,6 +483,7 @@ static void pc98_scsi_transfer_data(SCSIRequest *req, uint32_t len)
 
 static void pc98_scsi_command_complete(SCSIRequest *req, size_t resid)
 {
+//printf("command complete when?\n");
     Pc98ScsiState *s = req->hba_private;
 
     if (req != s->req) {
@@ -477,7 +509,9 @@ static void pc98_scsi_command_complete(SCSIRequest *req, size_t resid)
          * distinguish completion from a resumable intermediate phase.
          */
         s->regs[SBIC_CMD_PHASE] = 0x60;
+        pc98_scsi_raise_irq(s, CSR_STATUS_IN);
         pc98_scsi_raise_irq(s, CSR_SEL_XFER_DONE);
+	s->atten = 0;
     } else {
         s->phase = PHASE_STATUS_IN;
         s->status_irq_unread = true;
@@ -509,7 +543,7 @@ static const SCSIBusInfo pc98_scsi_bus_info = {
 };
 
 static void pc98_scsi_submit(Pc98ScsiState *s, const uint8_t *cdb,
-                             unsigned cdb_len)
+                             unsigned cdb_len, int go)
 {
     SCSIDevice *dev;
     uint8_t effective_cdb[sizeof(s->cdb)];
@@ -520,14 +554,26 @@ static void pc98_scsi_submit(Pc98ScsiState *s, const uint8_t *cdb,
     trace_pc98_scsi_submit(target, lun, cdb[0], cdb_len);
 
     pc98_scsi_cancel_request(s);
+//printf("submit start\n");
     dev = scsi_device_find(&s->bus, 0, target, lun);
     if (!dev) {
         s->phase = PHASE_IDLE;
         pc98_scsi_raise_irq(s, CSR_TIMEOUT);
         return;
     }
-
     memcpy(effective_cdb, cdb, cdb_len);
+for(int i= 0;i<cdb_len;i++){
+//printf("effective_cdb[%x] %x\n",i,effective_cdb[i]);
+//if(effective_cdb[0] == SERVICE_ACTION_IN_16)effective_cdb[0]= 0x25;//
+}
+//printf("effective scsi command cdb[0] = %x\n",cdb[0]);
+/*
+if(cdb[0] == 0x28){
+uint32_t LBA = cdb[2]<<24|cdb[3]<<16|cdb[4]<<8|cdb[5];
+uint16_t size = cdb[7]<<8|cdb[8];
+//printf("read LBA %x size %x\n",LBA,size);
+}
+*/
     /*
      * Legacy -drive if=scsi creates one image-backed LUN (LUN 0) per
      * target.  The PC-98 common BIOS mixes SCSI-1 CDB LUN encoding with the
@@ -588,14 +634,18 @@ static void pc98_scsi_submit(Pc98ScsiState *s, const uint8_t *cdb,
         dev->unit_attention = SENSE_CODE(NO_SENSE);
         s->bus.unit_attention = SENSE_CODE(NO_SENSE);
     }
-
     s->req = scsi_req_new(dev, 0, lun, effective_cdb, cdb_len, s);
     datalen = scsi_req_enqueue(s->req);
     s->req_to_initiator = datalen > 0;
-    if (datalen != 0) {
+//printf("cdb[0] %x datalen %x\n",effective_cdb[0],datalen);
+//printf("get count %x at phase %x\n",pc98_scsi_get_count(s),s->phase);
+if(pc98_scsi_get_count(s) ==0)pc98_scsi_set_count(s, datalen);
+    if ((datalen != 0) && go) {
         s->asr |= ASR_BSY;
+//printf("scsi_req continue------------------\n");
         scsi_req_continue(s->req);
     }
+//printf("submit end\n");
 }
 
 static void pc98_scsi_command(Pc98ScsiState *s, uint8_t command)
@@ -606,9 +656,10 @@ static void pc98_scsi_command(Pc98ScsiState *s, uint8_t command)
     s->regs[SBIC_COMMAND] = command;
     s->asr &= ~(ASR_LCI | ASR_INT);
     qemu_set_irq(s->irq, 0);
-
+//printf("         33c93 command scsi phase %x command %x\n",s->phase,command);
     switch (command & ~CMD_SINGLE_BYTE) {
     case CMD_RESET:
+	//printf("cmd reset\n");
         pc98_scsi_cancel_request(s);
         memset(s->regs, 0, 0x1b);
         /*
@@ -617,7 +668,8 @@ static void pc98_scsi_command(Pc98ScsiState *s, uint8_t command)
          * enable bit so that the reset-complete interrupt is observable.
          */
         s->phase = PHASE_IDLE;
-        pc98_scsi_raise_irq(s, CSR_RESET_ADVANCED);
+        pc98_scsi_raise_irq(s, CSR_RESET_ADVANCED); //33C93A
+//        pc98_scsi_raise_irq(s, 0);//33C93無印 freebsd/pc98ではこれで判別してるが Win95ドライバは無視
         break;
 
     case CMD_ABORT:
@@ -627,7 +679,40 @@ static void pc98_scsi_command(Pc98ScsiState *s, uint8_t command)
         break;
 
     case CMD_SELECT_ATN_XFER:
+//printf("   select with atn phase %x s->sat %x req_to_initiator %x\n",s->phase,s->sat,s->req_to_initiator);
+//printf("      s->req %x reg 0x10 %x phase %x\n",s->req != NULL ,s->regs[SBIC_CMD_PHASE],s->phase);
+        if ((!scsi_device_find(&s->bus, 0,
+                              s->regs[SBIC_DEST_ID] & 7, 0))||(s->target_lun != 0)) {
+            s->phase = PHASE_IDLE;
+            pc98_scsi_raise_irq(s, CSR_TIMEOUT);
+            break;
+        }
+
+	pc98_scsi_submit(s, s->cdb, s->cdb_len, 0);
+//if(s->sat && (s->phase == PHASE_DATA_IN || s->phase == PHASE_DATA_OUT) ){
+if(0){
+            pc98_scsi_start_data(s);
+		break;
+}else if(s->req_to_initiator == 0){
+//       s->phase = PHASE_MSG_OUT;
+//       pc98_scsi_raise_irq(s, CSR_MSG_OUT);//終了後 DISCONNECT
+//       s->phase = PHASE_MSG_IN;
+//       pc98_scsi_raise_irq(s, CSR_MSG_IN);//終了後 DISCONNECT
+}else{
+	s->atten = 1;
+	s->sat = true;
+	s->phase = PHASE_MSG_OUT;
+       pc98_scsi_raise_irq(s, CSR_MSG_OUT);//発射してるが割り込み処理の発生が遅い 下まで進んでから発射してる ので途中経路をいじくった
+}
+	[[fallthrough]];
     case CMD_SELECT_XFER:
+//printf("                without ATN phase %x s->sat %x\n",s->phase,s->sat);
+        if ((!scsi_device_find(&s->bus, 0,
+                              s->regs[SBIC_DEST_ID] & 7, 0))||(s->target_lun != 0)) {
+            s->phase = PHASE_IDLE;
+            pc98_scsi_raise_irq(s, CSR_TIMEOUT);
+            break;
+        }
         /*
          * Command phase 45h resumes the data phase of an interrupted
          * level-2 select-and-transfer operation.  Do not submit the CDB a
@@ -645,13 +730,16 @@ static void pc98_scsi_command(Pc98ScsiState *s, uint8_t command)
             s->asr |= ASR_LCI;
             break;
         }
+	if(s->atten != 1)
         memcpy(s->cdb, &s->regs[SBIC_CDB], cdb_len);
         s->sat = true;
         s->regs[SBIC_CMD_PHASE] = 0x00;
-        pc98_scsi_submit(s, s->cdb, cdb_len);
+//printf("scsi submit exe\n");
+        pc98_scsi_submit(s, s->cdb, cdb_len, 1);
         break;
 
     case CMD_SELECT_ATN:
+//printf("         only select with ATN\n");
         if (!scsi_device_find(&s->bus, 0,
                               s->regs[SBIC_DEST_ID] & 7, 0)) {
             s->phase = PHASE_IDLE;
@@ -665,6 +753,7 @@ static void pc98_scsi_command(Pc98ScsiState *s, uint8_t command)
         break;
 
     case CMD_SELECT:
+//printf("         only select NO-ATN\n");
         if (!scsi_device_find(&s->bus, 0,
                               s->regs[SBIC_DEST_ID] & 7, 0)) {
             s->phase = PHASE_IDLE;
@@ -675,6 +764,9 @@ static void pc98_scsi_command(Pc98ScsiState *s, uint8_t command)
         s->phase = PHASE_COMMAND;
         s->cdb_pos = 0;
         pc98_scsi_raise_irq(s, CSR_SELECTED);
+//        pc98_scsi_raise_irq(s, s->req_to_initiator ?
+//                            CSR_DATA_IN : CSR_DATA_OUT);
+//printf("select end\n");
         break;
 
     case CMD_ASSERT_ATN:
@@ -693,6 +785,10 @@ static void pc98_scsi_command(Pc98ScsiState *s, uint8_t command)
         break;
 
     case CMD_TRANSFER_INFO:
+if(command & 0x80){
+	pc98_scsi_set_count(s, 1);
+}
+//printf("cmd transinfo at phase %x async_len %x count %x\n",s->phase,s->async_len,pc98_scsi_get_count(s));
         if (s->phase == PHASE_DATA_IN || s->phase == PHASE_DATA_OUT) {
             /*
              * A non-combination command first reports the new DATA phase.
@@ -706,6 +802,7 @@ static void pc98_scsi_command(Pc98ScsiState *s, uint8_t command)
             if (s->async_len) {
                 s->asr &= ~(ASR_INT | ASR_BSY);
                 s->asr |= ASR_DBR;
+s->asr |= ASR_BSY;	//freebsd11.4 hack
             }
         } else if (s->phase == PHASE_STATUS_IN) {
             /*
@@ -716,23 +813,32 @@ static void pc98_scsi_command(Pc98ScsiState *s, uint8_t command)
              * would skip the byte and interpret stale stack data as target
              * status.
              */
+//printf("status irq unread? %x\n",s->status_irq_unread);
             if (s->status_irq_unread) {
                 pc98_scsi_raise_irq(s, CSR_STATUS_IN);
             } else {
                 s->asr |= ASR_DBR | ASR_BSY;
             }
         } else if (s->phase == PHASE_MSG_IN) {
+		//printf("msg in\n");
             if (s->msg_irq_unread) {
                 pc98_scsi_raise_irq(s, CSR_MSG_IN);
             } else {
                 s->asr |= ASR_DBR | ASR_BSY;
             }
+        } else if (s->phase == PHASE_IDLE) {
+                pc98_scsi_raise_irq(s, CSR_SEL_XFER_DONE);
+	s->atten = 0;
         } else {
+//		if(s->phase == PHASE_MSG_OUT)printf("msg out phase\n");
+//		if(s->phase == PHASE_COMMAND)printf("command out phase\n");
             s->asr |= ASR_DBR | ASR_BSY;
         }
+//printf("phase %x trans to start?\n",s->phase);
         break;
 
     default:
+	//printf("abort command\n");
         s->asr |= ASR_LCI;
         break;
     }
@@ -740,6 +846,7 @@ static void pc98_scsi_command(Pc98ScsiState *s, uint8_t command)
 
 static uint8_t pc98_scsi_data_read(Pc98ScsiState *s)
 {
+//printf("data register or CC6h read phase %x\n",s->phase);
     uint8_t value = 0xff;
     uint32_t count;
 
@@ -747,6 +854,7 @@ static uint8_t pc98_scsi_data_read(Pc98ScsiState *s)
         value = s->status_byte;
         count = pc98_scsi_get_count(s);
         if (count) {
+//printf("set count at 2 %x\n",count);
             pc98_scsi_set_count(s, count - 1);
         }
         s->asr &= ~ASR_DBR;
@@ -758,16 +866,19 @@ static uint8_t pc98_scsi_data_read(Pc98ScsiState *s)
     }
 
     if (s->phase == PHASE_MSG_IN) {
+//printf("message in phase sat %x\n",s->sat);
         /* COMMAND COMPLETE message */
         count = pc98_scsi_get_count(s);
         if (count) {
+//printf("set count at 3 %x\n",count);
             pc98_scsi_set_count(s, count - 1);
         }
+        s->msg_irq_unread = false;
         s->asr &= ~ASR_DBR;
         s->phase = PHASE_IDLE;
-        s->msg_irq_unread = false;
         pc98_scsi_raise_irq(s, CSR_DISCONNECT);
-        return 0x00;
+//printf("message from scsi device %x\n",value);
+        return 0x00;//not 0 Identify Wrong
     }
 
     if (s->phase == PHASE_DATA_IN && s->async_len) {
@@ -775,11 +886,15 @@ static uint8_t pc98_scsi_data_read(Pc98ScsiState *s)
         s->async_len--;
         count = pc98_scsi_get_count(s);
         if (count) {
+//printf("set count at 4 %x\n",count);
             pc98_scsi_set_count(s, count - 1);
         }
+//printf("async_len %x count %x\n",s->async_len,count);
         if (!s->async_len) {
+//	printf("1\n");
             pc98_scsi_finish_chunk(s);
         } else if (count && !pc98_scsi_get_count(s)) {
+	//printf("2\n");
             /*
              * The backend buffer may span several Linux scatter-gather
              * segments.  Stop at the programmed WD transfer count and let
@@ -790,14 +905,17 @@ static uint8_t pc98_scsi_data_read(Pc98ScsiState *s)
             pc98_scsi_raise_irq(s, CSR_DATA_IN);
         }
     }
+//if(value != 0xff)
+//printf("return %x\n",value);
     return value;
 }
 
 static void pc98_scsi_data_write(Pc98ScsiState *s, uint8_t value)
 {
     uint32_t count;
-
+//printf("data out in phase %x %x sat %x\n",s->phase, value,s->sat);
     if (s->phase == PHASE_MSG_OUT) {
+//printf("message out data %x to device datalength %x\n",value, pc98_scsi_get_count(s));
         /*
          * SELECT WITH ATN initiators normally specify the LUN in an
          * IDENTIFY message rather than programming TARGET_LUN.  Henry ASPI
@@ -812,6 +930,7 @@ static void pc98_scsi_data_write(Pc98ScsiState *s, uint8_t value)
         s->cdb_pos = 0;
         s->asr &= ~ASR_DBR;
         pc98_scsi_raise_irq(s, CSR_COMMAND_OUT);
+//printf("message out end????????\n");
         return;
     }
 
@@ -819,6 +938,7 @@ static void pc98_scsi_data_write(Pc98ScsiState *s, uint8_t value)
         if (!s->cdb_pos) {
             s->cdb_len = scsi_cdb_length(&value);
             if ((int)s->cdb_len <= 0 || s->cdb_len > sizeof(s->cdb)) {
+		//printf("datawrite command ignore\n");
                 s->asr |= ASR_LCI;
                 return;
             }
@@ -827,7 +947,8 @@ static void pc98_scsi_data_write(Pc98ScsiState *s, uint8_t value)
         s->cdb[s->cdb_pos++] = value;
         if (s->cdb_pos == s->cdb_len) {
             s->asr &= ~ASR_DBR;
-            pc98_scsi_submit(s, s->cdb, s->cdb_len);
+		//printf("scsi_submit exe 1\n");
+            pc98_scsi_submit(s, s->cdb, s->cdb_len, 1);
         }
         return;
     }
@@ -837,6 +958,7 @@ static void pc98_scsi_data_write(Pc98ScsiState *s, uint8_t value)
         s->async_len--;
         count = pc98_scsi_get_count(s);
         if (count) {
+//printf("set count at 5 %x\n",count);
             pc98_scsi_set_count(s, count - 1);
         }
         if (!s->async_len) {
@@ -852,10 +974,12 @@ static uint32_t pc98_scsi_io_read(void *opaque, uint32_t port)
 {
     Pc98ScsiState *s = opaque;
     uint8_t value;
-
     switch (port) {
     case PC98_SCSI_IOBASE:
         return s->asr;
+
+    case PC98_SCSI_IOBASE + 1:
+	return s->reg_index;	//for debug
 
     case PC98_SCSI_IOBASE + 2:
         if (s->reg_index == SBIC_STATUS) {
@@ -880,7 +1004,13 @@ static uint32_t pc98_scsi_io_read(void *opaque, uint32_t port)
             value = pc98_scsi_data_read(s);
         } else {
             value = s->regs[s->reg_index & 0x7f];
+//		if(s->reg_index ==SBIC_SOURCE_ID) value &= ~0x80;//disable reselection
+//		if(s->reg_index == 0x37) return 0x56;//value = 0x56;//IF-2771
+		if(s->reg_index == 0x32)return ~value;//PC-9801-55U 本物
         }
+//if(s->reg_index > 0x19)
+//printf("read from %x %x %x\n",port,s->reg_index,value);
+
         /*
          * The WD33C93 address register auto-increments after indirect
          * accesses except for the Command and Data registers.  Firmware
@@ -891,14 +1021,19 @@ static uint32_t pc98_scsi_io_read(void *opaque, uint32_t port)
             s->reg_index != SBIC_DATA) {
             s->reg_index++;
         }
+if((s->reg_index & 0x7f) > BOARD_AUX_CONFIG)return 0xff;
         return value;
 
     case PC98_SCSI_IOBASE + 4:
+//printf("read from CC4\n");
         /* Low bits are the fixed PC-98 DMA channel number (DMA0). */
         return 0x00;
 
     case PC98_SCSI_IOBASE + 6:
-        return pc98_scsi_data_read(s);
+	value = pc98_scsi_data_read(s);
+//	printf("read data from cc6 %x\n",value);
+	return value;
+//        return pc98_scsi_data_read(s);
 
     default:
         return 0xff;
@@ -909,18 +1044,46 @@ static void pc98_scsi_io_write(void *opaque, uint32_t port, uint32_t data)
 {
     Pc98ScsiState *s = opaque;
     uint8_t value = data;
-
+//printf("IO %x write %x\n",port,value);
     switch (port) {
     case PC98_SCSI_IOBASE:
+//	printf("s->phase %x reg %x\n",s->phase, data);
         s->reg_index = value & 0x7f;
+	 s->reg_index_ = s->reg_index;
         break;
 
+    case PC98_SCSI_IOBASE + 1:
+	printf("IO CC1h outb %x\n",value);	//for debug
+	break;
     case PC98_SCSI_IOBASE + 2:
+//if(s->reg_index > 0x19)
+//printf("s->phase %x reg %x write data %x old %x\n",s->phase,s->reg_index, data,s->reg_index_);
+      if((s->reg_index >= SBIC_CDB) && (s->reg_index < SBIC_CDB + 16)){	//SBIC_TARGET_LUN)) {
+	//printf("cdb[%x] %x\n",s->reg_index -SBIC_CDB, value);
+	if((s->reg_index_ == SBIC_CDB)||(s->reg_index < SBIC_CDB + 12))
+		s->cdb[s->reg_index-SBIC_CDB] = value;
+//	else
+//		printf("ignore cdb\n");
+      } else if (s->reg_index == 0){
+	//printf("cdb_len %x\n",value);
+		s->cdb_len = value;
+      }
         if (s->reg_index == SBIC_COMMAND) {
             pc98_scsi_command(s, value);
         } else if (s->reg_index == SBIC_DATA) {
             pc98_scsi_data_write(s, value);
+        } else if ((s->phase == PHASE_COMMAND) && (s->reg_index >= SBIC_CDB) && (s->reg_index < SBIC_TARGET_LUN)) {
+            pc98_scsi_data_write(s, value);
         } else {
+	 if((s->reg_index >= SBIC_COUNT) && (s->reg_index <= SBIC_COUNT+2)){
+		if ((s->phase == PHASE_STATUS_IN)||((s->sat == 1)&&(s->async_len == 0)&&(pc98_scsi_get_count(s)==0))){//超適当ハック
+			//printf("ignore counter setting\n");
+			value = s->regs[s->reg_index & 0x7f];//ステータスフェーズ中に何かを弄られるのを拒否
+		}
+            s->regs[s->reg_index & 0x7f] = value;
+			pc98_scsi_set_count(s, pc98_scsi_get_count(s));
+			//printf("set count here to %x reg %x value %x\n",pc98_scsi_get_count(s),s->reg_index,value);
+            }
             s->regs[s->reg_index & 0x7f] = value;
             if (s->reg_index == SBIC_TARGET_LUN) {
                 /*
@@ -946,6 +1109,7 @@ static void pc98_scsi_io_write(void *opaque, uint32_t port, uint32_t data)
         break;
 
     case PC98_SCSI_IOBASE + 4:
+//printf("IO CC4h write %x\n",value);
         if (value == BOARD_DMA_ENABLE) {
             s->board_dma = BOARD_DMA_ENABLE;
             /*
@@ -966,6 +1130,7 @@ static void pc98_scsi_io_write(void *opaque, uint32_t port, uint32_t data)
         break;
 
     case PC98_SCSI_IOBASE + 6:
+//	printf("write data with cc6\n");
         pc98_scsi_data_write(s, value);
         break;
     }
@@ -973,6 +1138,8 @@ static void pc98_scsi_io_write(void *opaque, uint32_t port, uint32_t data)
 
 static const MemoryRegionPortio pc98_scsi_portio[] = {
     { PC98_SCSI_IOBASE,     1, 1,
+      .read = pc98_scsi_io_read, .write = pc98_scsi_io_write },
+    { PC98_SCSI_IOBASE + 1, 1, 1,
       .read = pc98_scsi_io_read, .write = pc98_scsi_io_write },
     { PC98_SCSI_IOBASE + 2, 1, 1,
       .read = pc98_scsi_io_read, .write = pc98_scsi_io_write },
@@ -1047,7 +1214,7 @@ static void pc98_scsi_reset(DeviceState *dev)
     memset(s->regs, 0, sizeof(s->regs));
     s->regs[SBIC_OWN_ID] = 0x9f;        /* 20 MHz, parity, advanced, ID 7 */
     s->regs[BOARD_MEM_BANK] = 0x04;     /* ROM bank 0, interrupt enabled */
-    s->regs[BOARD_MEM_WINDOW] = 0x09;   /* D2000h */
+    s->regs[BOARD_MEM_WINDOW] = 0x09|0x60;   /* D2000h  over 286*/
     /* Bits 3..5 are the PC-9801-92 IRQ jumper encoding; ID 7 is initiator. */
     s->regs[BOARD_AUX_CONFIG] = (irq_index << 3) | 7;
     s->reg_index = 0;
@@ -1061,6 +1228,7 @@ static void pc98_scsi_reset(DeviceState *dev)
     s->status_irq_unread = false;
     s->msg_irq_unread = false;
     s->sat = false;
+s->atten = 0;
     qemu_set_irq(s->irq, 0);
 }
 
@@ -1207,6 +1375,7 @@ static void pc98_scsi_realize(DeviceState *dev, Error **errp)
     scsi_bus_init(&s->bus, sizeof(s->bus), dev, &pc98_scsi_bus_info);
     s->dma = isa_bus_get_dma(bus, 0);
     if (s->dma) {
+//printf("dma setting ok?\n");
         IsaDmaClass *dc = ISADMA_GET_CLASS(s->dma);
 
         dc->register_channel(s->dma, 0, pc98_scsi_dma_transfer, s);
