@@ -1298,7 +1298,6 @@ static void gdc_cmdreg_write(void *opaque, uint32_t addr, uint32_t value)
 {
     /* ioport 0x62(chr), 0xa2(gfx) */
     GDCState *s = opaque;
-
     if (s->cmdreg != -1) {
         gdc_process_cmd(s);
     }
@@ -3150,7 +3149,6 @@ static void mode_flipflop2_write(void *opaque, uint32_t addr, uint32_t value1)
     int num = (value1 >> 1) & 0x7f;
 
     trace_pc98_vga_mode_write(0x6a, value1);
-
     switch (num) {
     case 0x00:
         /* select 8/16 color */
@@ -3312,7 +3310,8 @@ static uint32_t mode_status_read(void *opaque, uint32_t addr)
         }
         break;
     case 0x0a:
-        if (s->pegc_enabled) {
+//        if (s->pegc_enabled) {
+	if(s->mode2[MODE2_256COLOR]){
             value |= 1;
         }
         break;
@@ -4419,11 +4418,29 @@ static void render_gfx_screen(VGAState *s)
     uint8_t b, r, g, e = 0;
     uint32_t *addr;
 
+	uint16_t SL1,SL2;
+	uint32_t SAD1,SAD2;
+
+	SL1= ( s->gdc_gfx.ra[2]>>4|s->gdc_gfx.ra[3]<<4 )&0x3ff;
+	SL2= ( s->gdc_gfx.ra[6]>>4|s->gdc_gfx.ra[7]<<4 )&0x3ff;
+	if(SL2 == 1)SL2 = 0;
+	if(SL2==SL1 && SL1 ==400)SL2=0;
+
+	SAD1= ((s->gdc_gfx.ra[2] & 0xf) << 16)|s->gdc_gfx.ra[1]<<8|s->gdc_gfx.ra[0];
+	SAD2= ((s->gdc_gfx.ra[6] & 0xf) << 16)|s->gdc_gfx.ra[5]<<8|s->gdc_gfx.ra[4];
+
+	SAD1 &= 0x3ffff;//upd7220 Graphic
+	SAD2 &= 0x3ffff;
+
+//	SAD1 &= 0xfffff;/upd72020 Graphic
+//	SAD2 &= 0xfffff;
     if (s->mode2[MODE2_256COLOR]) {
         bool mode_480 = s->pegc_enabled && s->mode2[MODE2_480LINE];
         const uint8_t *src = s->pegc_post;
         int height = mode_480 ? 480 : 400;
-        int pitch = 640;
+	height = SL1+SL2;
+        int pitch = s->gdc_gfx.pitch * 8;//640;
+//		Windows9xは128*8//NT系列は80*8
 
         if (!mode_480 && s->bank_disp == DIRTY_VRAM1) {
             src += 0x40000;
@@ -4486,12 +4503,17 @@ static void render_gfx_screen(VGAState *s)
 static bool update_display(void *opaque)
 {
     VGAState *s = opaque;
+	uint16_t SL1,SL2;
+	SL1= ( s->gdc_gfx.ra[2]>>4|s->gdc_gfx.ra[3]<<4 )&0x3ff;
+	SL2= ( s->gdc_gfx.ra[6]>>4|s->gdc_gfx.ra[7]<<4 )&0x3ff;
     bool pegc_480 = s->pegc_enabled && s->mode2[MODE2_256COLOR] &&
                     s->mode2[MODE2_480LINE];
     uint8_t chr_start = pegc_480 ? 0 : s->gdc_chr.start;
 
     /* render screen */
     s->height = pegc_480 ? 480 : 400;
+    if(s->height == 480)s->height = SL1 +SL2;
+
     if (s->mode1[MODE1_DISP]) {
         if (s->dirty & DIRTY_PALETTE) {
             /* update palette */
