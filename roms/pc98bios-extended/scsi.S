@@ -156,8 +156,12 @@ rom_init:
 
 /* Compatibility entry used by firmware that installs disk-ROM templates. */
 install_entry:
+	pushw	%bx
+	movw	$WA_DISK_ROM_SCSI0, %bx
+	addw	$0x20, %bx		//0x4d2
 	movb	$0xc2, 0(%bx)
 	movb	$0x82, 1(%bx)
+	popw	%bx
 	lret
 
 controller_init_entry:
@@ -289,7 +293,7 @@ int1b_hook:
 	cmpb	$0xa0, %al
 	je	1f
 	cmpb	$0xc0, %al
-	je	1f
+	je	3f
 	popw	%ax
 	/*
 	 * The free BIOS carries "Q98" after its fixed chain trampoline.  Test
@@ -324,6 +328,260 @@ int1b_hook:
 	pushw	%ax
 	movw	%sp, %bp
 	jmp	int1b_entry
+3:
+	popw	%ax
+	pushw	%ds
+	pushw	%si
+	pushw	%di
+	pushw	%es
+	pushw	%bp
+	pushw	%dx
+	pushw	%cx
+	pushw	%bx
+	pushw	%ax
+	movw	%sp, %bp
+	xorw	%ax, %ax
+	movw	%ax, %ds		//DS==0
+	incb	WA_BUSY		//2026-9-3
+	movb	0(%bp), %al
+	andb	$0x07, %al
+	movb	%al, WA_SCSI_TARGET
+	movb	$1, %dl
+	movb	%al, %cl
+	shlb	%cl, %dl
+	testb	%dl, WA_TARGETS
+	jz	5f
+
+	movb	1(%bp), %al
+	movb	%al, %ah
+//movw	$0xcc1, %dx
+//outb	%al, %dx
+	cmpb	$0x9, %al
+	je	complex
+	cmpb	$0x8, %al
+	je	complex_with_ATN
+	cmpb	$0xff, %al		//NT installer
+	je	5f
+/* DS:DX SRB, ES:BX buffer, AH SCSI-PHASE command */
+	andb	$0xf, %al
+	cmpb	$0x7, %al
+	je	select
+	cmpb	$0x6, %al
+	je	select_withATN
+	cmpb	$0xa, %al
+	je	command_phase
+	cmpb	$0x3, %al
+	je	negate_ack
+	cmpb	$0xb, %al
+	je	status_phase0
+	cmpb	$0xe, %al
+	je	msgout_phase
+	cmpb	$0xf, %al
+	je	msgin_phase
+	cmpb	$0x9, %al
+	je	datain_phase
+	cmpb	$0x8, %al
+	je	dataout_phase
+	jmp	5f
+5:
+	movb	$0x22, %ah
+4:
+	movb	%ah, 1(%bp)
+	andb	$0xfe, 0x16(%bp)
+	xorw	%ax, %ax
+	movw	%ax, %ds
+	decb	WA_BUSY
+	popw	%ax
+	popw	%bx
+	popw	%cx
+	popw	%dx
+	popw	%bp
+	popw	%es
+	popw	%di
+	popw	%si
+	popw	%ds
+	iret
+
+msgin_phase:
+datain_phase:
+status_phase0:
+	movw	2(%bp), %di
+	movw	4(%bp), %cx
+	movw	%cx, 2(%bp)
+	movw	$SCSI_DATA, %dx
+1:
+	inb	%dx, %al
+	stosb	%es:(%di)
+	loop	1b
+	movw	%cx, 4(%bp)		//残りデータ数==0の報告 underrunもoverrunもなし
+	jmp	status_phase
+dataout_phase:
+msgout_phase:
+	movw	2(%bp), %si
+	movw	4(%bp), %cx
+	movw	%cx, 2(%bp)
+	movw	$SCSI_DATA, %dx
+1:
+	outb	%al, %dx
+	lodsb	%es:(%si)
+	loop	1b
+	movw	%cx, 4(%bp)
+	jmp	status_phase
+negate_ack:
+	movw	$SCSI_ASR, %dx
+	movb	$SBIC_COMMAND, %al
+	outb	%al, %dx
+	movw	$SCSI_INDIRECT, %dx
+	movb	%ah, %al
+	outb	%al, %dx
+status_phase:
+	movw	$SCSI_ASR, %dx
+	movb	$SBIC_STATUS, %al
+	outb	%al, %dx
+	movw	$SCSI_INDIRECT, %dx
+	inb	%dx, %al
+cmpb $0x85, %al		//disconnect
+jne	1f
+//	movb	$0x16, %al
+1:
+	movb	%al, %ah
+//movw	$0xcc1, %dx
+//outb	%al, %dx
+	jmp	4b
+
+select_withATN:
+select:
+	movw	$SCSI_ASR, %dx
+	movb	$SBIC_DEST_ID, %al
+	outb	%al, %dx
+	movw	$SCSI_INDIRECT, %dx
+	movb	WA_SCSI_TARGET, %al
+	andb	$0xf, %al	//only ID
+	outb	%al, %dx
+
+	movw	$SCSI_ASR, %dx
+	movb	$SBIC_TARGET_LUN, %al
+	outb	%al, %dx
+	movw	$SCSI_INDIRECT, %dx
+//	xorb	%al, %al	//LUN0固定を解除
+	movb	WA_SCSI_TARGET, %al
+	shrb	$5, %al
+	outb	%al, %dx
+
+	movw	$SCSI_ASR, %dx
+	movb	$SBIC_COMMAND, %al
+	outb	%al, %dx
+	movw	$SCSI_INDIRECT, %dx
+	movb	%ah, %al
+	outb	%al, %dx
+
+	movw	$SCSI_ASR, %dx
+	movb	$SBIC_STATUS, %al
+	outb	%al, %dx
+	movw	$SCSI_INDIRECT, %dx
+	inb	%dx, %al
+	cmpb	$0x11,%al
+	jne	5b
+9:
+	movw	$SCSI_ASR, %dx
+	movb	$SBIC_STATUS, %al
+	outb	%al, %dx
+	movw	$SCSI_INDIRECT, %dx
+	inb	%dx, %al		//msg-out(0x8e) or command(0x8a)
+	movb	%al, %ah
+	andb	$0xf, %ah
+	jmp	4b
+
+/* AH:SCSI phase command ES:BX:buffer CX:transfer size*/
+command_phase:
+	movw	2(%bp), %si
+	movw	4(%bp), %cx
+
+	movw	$SCSI_ASR, %dx
+	movb	$SBIC_CDB, %al
+	outb	%al, %dx
+1:
+	movw	$SCSI_INDIRECT, %dx
+	lodsb	%es:(%si)
+	outb	%al, %dx
+	loop	1b
+
+	movw	$SCSI_ASR, %dx
+	movb	$SBIC_STATUS, %al
+	outb	%al, %dx
+	movw	$SCSI_INDIRECT, %dx
+	inb	%dx, %al
+//	andb	$0xf, %al
+//	orb	$0x10, %al
+	movb	%al, %ah
+	jmp 4b
+
+complex_with_ATN://しかしMSG-IN PHASE無視
+complex:
+	pushw	%es		//nochange ES
+	movw	10(%bp), %ax	//DS
+	movw	%ax, %es
+	movw	4(%bp), %ax	//transfer Length BIOS
+	movw	2(%bp), %bx	//transfer address
+	movw	6(%bp), %si	//SRBモドキ
+	movzbw	%es:2(%si), %cx	//CDB length
+	movb	%es:1(%si), %dl	//scsi direction
+//	movb	%es:4(%si), %dh	//scsi commnad for debug
+	movb	%es:5(%si), %dh	//LUNが5bit左シフトされて入ってる
+	orb	%dh, WA_SCSI_TARGET
+	pushw	%ds
+	pushw	%es
+	popw	%ds
+	pushw	%ss
+	popw	%es
+	movb	%cl, %dh
+//CDBだけで操作 selectはscsi_execの中のscsi_startで行われてる
+	subw	%cx, %sp
+	movw	%sp, %di
+	addw	$4, %si
+rep	movsb
+	movb	%dh, %cl
+	addw	%cx, %sp
+	popw	%ds
+	popw	%es
+
+	subw	%cx, %sp
+	subw	$4, %sp
+	movw	%sp, %si
+
+	movw	%bx, %di
+	movw	%ax, %bx
+	cmpb	$0x48, %dl
+	je	1f
+	cmpb	$0x44, %dl
+	je	2f
+	call	scsi_exec_nodata
+	jmp	3f
+1:
+	call	scsi_exec_out
+	jmp	3f
+2:
+	call	scsi_exec_in
+3:
+	addw	$4, %sp
+	movw	10(%bp), %dx	//DS
+	movw	%dx, %es
+	movw	6(%bp), %si	//SRBモドキ
+	movzbw	%es:2(%si), %cx	//CDB length
+	addw	%cx, %sp
+	movw	4(%bp), %cx
+	subw	%cx, 4(%bp)	//残りデータ数==0の報告
+	xorb	%al, %al
+	movb	%al, %es:(%si)	//status == 0 not scsi_status
+
+	movw	$SCSI_ASR, %dx
+	movb	$SBIC_STATUS, %al
+	outb	%al, %dx
+	movw	$SCSI_INDIRECT, %dx
+	inb	%dx, %al
+	andb	$0xf, %al
+	movb	%al, %ah
+	jmp	4b
 
 /*
  * Direct disk-ROM entry.  BP addresses the standard saved-register frame:
@@ -331,9 +589,13 @@ int1b_hook:
  * DS +10, IP +12, CS +14, FLAGS +16.
  */
 int1b_entry:
-	incb	WA_BUSY
+	pushl	%eax
+	pushl	%ecx
+	pushl	%edx
+
 	xorw	%ax, %ax
 	movw	%ax, %ds
+	incb	WA_BUSY		//2026-9-3
 	movb	0(%bp), %al
 	andb	$0x07, %al
 	movb	%al, WA_SCSI_TARGET
@@ -342,8 +604,9 @@ int1b_entry:
 	shlb	%cl, %dl
 	testb	%dl, WA_TARGETS
 	jz	int1b_not_ready
-
 	movb	1(%bp), %al
+//cmpb $0xd6, %al
+//je	int1b_bad_parameter
 	andb	$0x0f, %al
 	cmpb	$0x04, %al
 	je	int1b_sense
@@ -369,6 +632,7 @@ int1b_sense:
 	jmp	int1b_finish
 
 int1b_read:
+//	call	disableDMA
 	call	request_lba
 	jc	int1b_finish
 	call	request_buffer_count
@@ -376,6 +640,7 @@ int1b_read:
 	jmp	int1b_finish
 
 int1b_write:
+//	call	disableDMA
 	call	request_lba
 	jc	int1b_finish
 	call	request_buffer_count
@@ -393,13 +658,21 @@ int1b_bad_parameter:
 	movb	$0x40, %ah
 
 int1b_finish:
+//	call	enableDMA
+//	call	disableDMA
 	movb	%ah, 1(%bp)
 	andb	$0xfe, 0x16(%bp)
 	cmpb	$0x20, %ah
 	jb	1f
 	orb	$0x01, 0x16(%bp)
 1:
+	xorw	%ax, %ax
+	movw	%ax, %ds
 	decb	WA_BUSY
+	popl	%edx
+	popl	%ecx
+	popl	%eax
+
 	popw	%ax
 	popw	%bx
 	popw	%cx
@@ -426,7 +699,8 @@ request_lba:
 	ret
 2:
 	movzwl	4(%bp), %eax
-	movzbl	6(%bp), %edx
+//	movzbl	6(%bp), %edx
+	movzwl	6(%bp), %edx
 	shll	$16, %edx
 	orl	%edx, %eax
 	clc
@@ -547,18 +821,18 @@ scsi_read10:
 	movw	$10, %cx
 	call	scsi_exec_in
 	pushfw
-	popw	%bp
+	popw	%ax	//bug 2026-9-2
 	popw	%dx			/* discard CDB without changing FLAGS */
 	popw	%dx
 	popw	%dx
 	popw	%dx
 	popw	%dx
+	popw	%bp	//bug 2026-9-2
 	popw	%si
 	popw	%cx
 	popw	%bx
+	testw	$1, %ax
 	popl	%eax
-	testw	$1, %bp
-	popw	%bp
 	jnz	1f
 	xorb	%ah, %ah
 	clc
@@ -598,18 +872,18 @@ scsi_write10:
 	movw	$10, %cx
 	call	scsi_exec_out
 	pushfw
-	popw	%bp
+	popw	%ax	//bug 2026-9-2
 	popw	%dx			/* discard CDB without changing FLAGS */
 	popw	%dx
 	popw	%dx
 	popw	%dx
 	popw	%dx
+	popw	%bp	//bug 2026-9-2
 	popw	%si
 	popw	%cx
 	popw	%bx
+	testw	$1, %ax
 	popl	%eax
-	testw	$1, %bp
-	popw	%bp
 	jnz	1f
 	xorb	%ah, %ah
 	clc
@@ -621,6 +895,21 @@ scsi_write10:
 
 /* AX=wire byte count (zero means 64 KiB), BX=stored bytes, SS:SI CDB. */
 scsi_exec_in:
+/*
+pushw	%dx
+pushw	%ax
+movw	$0xcc1, %dx
+movw	%es, %ax
+outb	%al, %dx
+movb	%ah, %al
+outb	%al, %dx
+movw	%di, %ax
+outb	%al, %dx
+movb	%ah, %al
+outb	%al, %dx
+popw	%ax
+popw	%dx
+*/
 	pushw	%ax
 	pushw	%bx
 	call	scsi_start
@@ -711,13 +1000,16 @@ scsi_start:
 	outb	%al, %dx
 	movw	$SCSI_INDIRECT, %dx
 	movb	WA_SCSI_TARGET, %al
+	andb	$0xf, %al	//only ID
 	outb	%al, %dx
 
 	movw	$SCSI_ASR, %dx
 	movb	$SBIC_TARGET_LUN, %al
 	outb	%al, %dx
 	movw	$SCSI_INDIRECT, %dx
-	xorb	%al, %al
+//	xorb	%al, %al	//LUN0固定を解除
+	movb	WA_SCSI_TARGET, %al
+	shrb	$5, %al
 	outb	%al, %dx
 
 	movw	$SCSI_ASR, %dx
@@ -917,6 +1209,26 @@ boot_entry:
 	popw	%bx
 	popw	%ax
 	lret
+
+
+enableDMA:
+	pushw	%dx
+	pushw	%ax
+	movw	$0xcc4, %dx
+	movb	$1, %al
+	outb	%al, %dx
+	popw	%ax
+	popw	%dx
+	ret
+disableDMA:
+	pushw	%dx
+	pushw	%ax
+	movw	$0xcc4, %dx
+	movb	$2, %al
+	outb	%al, %dx
+	popw	%ax
+	popw	%dx
+	ret
 
 	/* Keep the image exactly within the board's 8 KiB ROM aperture. */
 	.org	0x1fff

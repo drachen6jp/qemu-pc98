@@ -103,12 +103,19 @@
 	movw	$BIOS_SEG, (4 * \number + 2)
 	.endm
 
+
+.org 0x00dd8
+.ascii "Copyright (C)"//さすがにそのままの文字列でも
+
+
 	/*
 	 * QEMU fills this otherwise-unused area with an Intel MPS 1.4 floating
 	 * pointer and configuration table when pc9821 SMP is selected.
 	 * Firmware code does not participate in AP startup; the operating
 	 * system uses the advertised local APICs and sends INIT/SIPI itself.
 	 */
+
+
 	.org	0x0cc40
 mps_table_reserve:
 	.fill	0x200, 1, 0xff
@@ -140,6 +147,11 @@ pnp_installation_check:
 	.ascii	"PC98"			/* OEM device identifier */
 	.word	0x0000			/* real-mode BIOS data segment */
 	.long	0x00000000		/* protected-mode BIOS data base */
+
+
+
+.org 0xd38e
+//この位置の命令列も見られている
 
 	/*
 	 * PC-9821 machine-capability table at physical F8E80h.
@@ -246,7 +258,8 @@ cold_start:
 	 * even though the kernel and Core-Graph driver have already started.
 	 */
 	movw	$0x1900, 0x054a
-	movw	$0x704f, 0x054c
+//	movw	$0x704f, 0x054c
+	movw	$0x7c4f, 0x054c	//GDC 5MHzフラグON forぷよぷよ通 他?
 	call	pegc_probe
 	/*
 	 * BIOS_FLAG0 bit 1 advertises the 1-MiB floppy interface (the native
@@ -446,6 +459,8 @@ scsi_rom_init:
 	call	scsi_rom_present
 	jnc	1f
 	lcall	$SCSI_ROM_SEG, $0x0000
+	lcall	$SCSI_ROM_SEG, $0x000c
+//	lcall	$SCSI_ROM_SEG, $0x000f
 1:
 	ret
 
@@ -1337,6 +1352,9 @@ int18:
 	je	int18_graph_area
 	cmpb	$0x43, %ah
 	je	int18_graph_palette
+
+	cmpb	$0x30, %ah
+	je	int18_set_crt
 	jmp	int18_return
 
 int18_key_wait:
@@ -3874,6 +3892,68 @@ ascii_table:
 	.byte	0x00, 0x20
 ascii_table_end:
 
+
+
+int18_set_crt:
+	movw	$0x6a, %dx
+	movb	$0x7, %al
+	outb	%al, %dx
+
+	test	$0xc, %al
+	je	2f		//16color
+
+	movb	$0x21, %al	//256color
+	outb	%al, %dx
+
+	and	$0x30, %bh
+	cmp	$0x30, %bh
+	jne	4f
+
+	movw	$0xa2, %dx	//SlaveGDC cmdport
+	movb	$0x72, %al	//ra[2]
+	outb	%al, %dx
+	movw	$0xa0, %dx	//slaveGDC data port
+	movb	$0x0, %al	//GDC scroll cmd SL1 LSB
+	outb	%al, %dx
+
+	movw	$0xa2, %dx	//slaveGDC cmd port
+	movb	$0x73, %al	//ra[3]
+	outb	%al, %dx
+	movw	$0xa0, %dx
+	movb	$0x1e, %al	//GDC scroll cmd SL1 HSB
+	outb	%al, %dx
+
+	movb	$0x69, %al	//640x480
+	movw	$0x6a, %dx
+	jmp	3f
+4:
+	movw	$0xa2, %dx	//SlaveGDC cmdport
+	movb	$0x72, %al	//ra[2]
+	outb	%al, %dx
+	movw	$0xa0, %dx	//slaveGDC data port
+	movb	$0x0, %al	//GDC scroll cmd SL1 LSB
+	outb	%al, %dx
+
+	movw	$0xa2, %dx	//slaveGDC cmd port
+	movb	$0x73, %al	//ra[3]
+	outb	%al, %dx
+	movw	$0xa0, %dx
+	movb	$0x19, %al	//GDC scroll cmd SL1 HSB
+	outb	%al, %dx
+
+	movb	$0x68, %al	//640x400
+	movw	$0x6a, %dx
+	jmp	3f
+2:
+	movb	$0x20, %al
+3:
+	outb	%al, %dx
+1:
+	movb	$0x6, %al
+	outb	%al, %dx	
+	xorb	%ah, %ah
+	jmp	int18_return
+
 /*
  * Publish PEGC in the BIOS work area only when the board acknowledges the
  * standard 256-colour enable flip-flop.  With -M pc9821,pegc=off the ITF has
@@ -3909,4 +3989,5 @@ pegc_probe:
 	.org	0x17ff0
 	ljmp	$BIOS_SEG, $0x0000
 
+.word 0x93,0x4f
 	.org	0x18000
